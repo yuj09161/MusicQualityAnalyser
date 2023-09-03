@@ -41,15 +41,15 @@ class Ui_Main:
         self.chkEnableSizeCut.setObjectName(u"lbSize")
         self.glSetGeneral.addWidget(self.chkEnableSizeCut, 0, 0, 1, 1)
 
-        self.lbThread = QLabel(self.gbSetGeneral)
-        self.lbThread.setObjectName(u"lbThread")
-        self.lbThread.setAlignment(Qt.AlignCenter)
-        self.glSetGeneral.addWidget(self.lbThread, 0, 3, 1, 1)
-
         self.spSize = QSpinBox(self.gbSetGeneral)
         self.spSize.setObjectName(u"spSize")
         self.spSize.setMaximum(524288)
         self.glSetGeneral.addWidget(self.spSize, 1, 0, 1, 1)
+
+        self.chkEnableCut = QCheckBox(self.gbSetGeneral)
+        self.chkEnableCut.setObjectName(u"chkEnableCut")
+        self.glSetGeneral.addWidget(self.chkEnableCut, 0, 1, 1, 2)
+        self.glCent.addWidget(self.gbSetGeneral, 0, 0, 1, 1)
 
         self.teStart = QTimeEdit(self.gbSetGeneral)
         self.teStart.setObjectName(u"teStart")
@@ -61,14 +61,14 @@ class Ui_Main:
         self.teDuration.setMaximumTime(QTime(0, 59, 59))
         self.glSetGeneral.addWidget(self.teDuration, 1, 2, 1, 1)
 
+        self.lbThread = QLabel(self.gbSetGeneral)
+        self.lbThread.setObjectName(u"lbThread")
+        self.glSetGeneral.addWidget(self.lbThread, 0, 3, 1, 1)
+
         self.spThread = QSpinBox(self.gbSetGeneral)
         self.spThread.setObjectName(u"spThread")
+        self.spThread.setMinimum(1)
         self.glSetGeneral.addWidget(self.spThread, 1, 3, 1, 1)
-
-        self.chkEnableCut = QCheckBox(self.gbSetGeneral)
-        self.chkEnableCut.setObjectName(u"chkEnableCut")
-        self.glSetGeneral.addWidget(self.chkEnableCut, 0, 1, 1, 2)
-        self.glCent.addWidget(self.gbSetGeneral, 0, 0, 1, 1)
         # gbSetGeneral
 
         # gbSetThreshold
@@ -104,8 +104,10 @@ class Ui_Main:
         self.spNdivM.setObjectName(u"spNdivM")
         self.glSetThreashold.addWidget(self.spNdivM, 1, 1, 1, 1)
 
-        self.spdB = QSpinBox(self.gbSetThreshold)
+        self.spdB = QDoubleSpinBox(self.gbSetThreshold)
         self.spdB.setObjectName(u"spdB")
+        self.spdB.setDecimals(1)
+        self.spdB.setRange(-20, 0)
         self.glSetThreashold.addWidget(self.spdB, 1, 2, 1, 1)
 
         self.spdBDiff = QDoubleSpinBox(self.gbSetThreshold)
