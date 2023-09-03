@@ -4,13 +4,14 @@ from functools import partialmethod
 from io import BytesIO
 from itertools import chain, repeat
 from math import log10
-from multiprocessing import cpu_count, Queue
+from multiprocessing import cpu_count  # , Queue
+from queue import Queue
 from typing import Callable, Dict, Iterable, List, NamedTuple, Optional, Union
 import os
 import time
 
 from PySide6.QtCore import QRunnable, QThreadPool, Signal, QTimer, SignalInstance
-from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox, QWidget
 from __feature__ import snake_case, true_property
 
@@ -264,12 +265,12 @@ class Main(QMainWindow, Ui_Main):
         self.chkEnableSizeCut.clicked.connect(self.__set_size_cut_enable)
         self.chkEnableCut.clicked.connect(self.__set_time_edit_enable)
         self.btnAddFiles.clicked.connect(self.__add_files)
-        self.btnApplyThreshold.clicked.connect(self.__apply_threshold)
+        self.btnApplyThreshold.clicked.connect(self.__apply_threshold_all)
         self.btnStartAnalyse.clicked.connect(self.__start_analyse)
         self.btnLoadRes.clicked.connect(self.__load_result)
         self.btnSaveRes.clicked.connect(self.__save_result)
 
-        self.analyse_done.connect(self.__done_analyse)
+        # self.analyse_done.connect(self.__done_analyse)
 
         self.__set_default_values()
         self.__resize_rows()
@@ -313,39 +314,43 @@ class Main(QMainWindow, Ui_Main):
         self.__audio_infos.add_files(files)
         self.__resize_rows()
 
-    def __apply_threshold(self):
+    def __apply_threshold_all(self):
+        for row in range(self.__audio_infos.row_count()):
+            self.__apply_threshold(row)
+
+    def __apply_threshold(self, row: Optional[int] = None):
         threshold_h_div_m = self.spHDivM.value
         threshold_n_div_m = self.spNdivM.value
-        idial_dB = self.spdB.value
-        threshold_dB_diff = self.spdBDiff.value
-        for row in range(self.__audio_infos.row_count()):
-            item_h_div_m = self.__audio_infos.item(row, 7)
-            h_div_m = Decimal(item_h_div_m.text())
-            item_n_div_m = self.__audio_infos.item(row, 8)
-            n_div_m = Decimal(item_n_div_m.text())
-            item_dBFS = self.__audio_infos.item(row, 4)
-            dBFS = Decimal(item_dBFS.text())
-            if 
+        idial_dB = Decimal(self.spdB.text[1:-5])
+        threshold_dB_diff = Decimal(self.spdBDiff.text[1:-5])
+
+        item_h_div_m = self.__audio_infos.item(row, 7)
+        item_n_div_m = self.__audio_infos.item(row, 8)
+        item_dBFS = self.__audio_infos.item(row, 4)
+
+        h_div_m = Decimal(item_h_div_m.text().replace('%', ''))
+        n_div_m = Decimal(item_n_div_m.text().replace('%', ''))
+        dBFS = Decimal(item_dBFS.text())
+
+        if h_div_m > threshold_h_div_m:
+            item_h_div_m.set_foreground(QColor(255, 0, 0))
+        if n_div_m > threshold_n_div_m:
+            item_n_div_m.set_foreground(QColor(255, 0, 0))
+        if dBFS > idial_dB + threshold_dB_diff or dBFS < idial_dB - threshold_dB_diff:
+            item_dBFS.set_foreground(QColor(255, 0, 0))
 
     def __get_results(self):
-        print('get_results')
-        print(self.__future.running())
         while not self.__result_queue.empty():
             result = self.__result_queue.get_nowait()
             self.__results[result.id_] = result
+            self.__remain_works -= 1
         for id_ in self.__results:
             self.__done_analyse(id_)
 
     def __done_analyse(self, id_: int):
-        '''
-        while not self.__result_queue.empty():
-            result = self.__result_queue.get_nowait()
-            self.__result_queue.task_done()
-            self.__results[result.id_] = result
-        '''
         self.__audio_infos.set_result(id_, self.__results[id_])
+        self.__apply_threshold(id_)
         self.__resize_rows()
-        self.__remain_works -= 1
         if self.__remain_works == 0:
             self.__analyse_end()
 
@@ -385,6 +390,7 @@ class Main(QMainWindow, Ui_Main):
                 self.spFreqHL.value, self.spFreqHH.value,
                 self.spFreqNL.value,
             )
+            pool.start(worker)
             workers.append(worker)
             '''
             self.__future = pool.submit(
