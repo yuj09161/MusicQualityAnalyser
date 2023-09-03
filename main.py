@@ -289,7 +289,7 @@ class Main(QMainWindow, Ui_Main):
         self.spFreqHH.value = 19500
         self.spFreqNL.value = 20500
 
-        self.spHDivM.value = 40
+        self.spHDivM.value = 80
         self.spNdivM.value = 65
         self.spdB.value = -11.5
         self.spdBDiff.value = 0.5
@@ -321,18 +321,18 @@ class Main(QMainWindow, Ui_Main):
     def __apply_threshold(self, row: Optional[int] = None):
         threshold_h_div_m = self.spHDivM.value
         threshold_n_div_m = self.spNdivM.value
-        idial_dB = Decimal(self.spdB.text[1:-5])
+        idial_dB = -Decimal(self.spdB.text[1:-5])
         threshold_dB_diff = Decimal(self.spdBDiff.text[1:-5])
 
         item_h_div_m = self.__audio_infos.item(row, 7)
         item_n_div_m = self.__audio_infos.item(row, 8)
-        item_dBFS = self.__audio_infos.item(row, 4)
+        item_dBFS = self.__audio_infos.item(row, 2)
 
         h_div_m = Decimal(item_h_div_m.text().replace('%', ''))
         n_div_m = Decimal(item_n_div_m.text().replace('%', ''))
         dBFS = Decimal(item_dBFS.text())
 
-        if h_div_m > threshold_h_div_m:
+        if h_div_m < threshold_h_div_m:
             item_h_div_m.set_foreground(QColor(255, 0, 0))
         if n_div_m > threshold_n_div_m:
             item_n_div_m.set_foreground(QColor(255, 0, 0))
