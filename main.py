@@ -1,4 +1,6 @@
+from collections.abc import Sequence as ABCSequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from copy import deepcopy
 from decimal import Decimal
 from functools import partialmethod
 from io import BytesIO
@@ -6,9 +8,9 @@ from itertools import chain, repeat
 from math import log10
 from multiprocessing import cpu_count  # , Queue
 from queue import Queue
-from typing import Callable, Dict, Iterable, List, NamedTuple, Optional, Union
+from typing import Callable, Dict, Generic, Iterable, List, NamedTuple, Optional, Sequence, Tuple, TypeVar, Union
 import os
-import time
+import json
 
 from PySide6.QtCore import QRunnable, QThreadPool, Signal, QTimer, SignalInstance
 from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
@@ -21,15 +23,26 @@ import numpy as np
 from Ui import Ui_Main
 
 
-class Result(NamedTuple):
+class FFTResult(NamedTuple):
     id_: int
     dbFS: float
-    max_freq: int
     intensity_L: Decimal
     intensity_M: Decimal
     intensity_H: Decimal
     intensity_N: Decimal
     raw_result: np.ndarray
+
+
+class FileResult(NamedTuple):
+    path: str
+    dBFS: float
+    intensity_L: Decimal
+    intensity_M: Decimal
+    intensity_H: Decimal
+    intensity_N: Decimal
+    H_div_M: Decimal
+    N_div_M: Decimal
+    raw_result: Optional[np.ndarray]
 
 
 def fft_audiosegment(
@@ -88,10 +101,9 @@ def do_fft(
 
         fft_result = fft_audiosegment(audio, start_time, duration)
 
-        results.put_nowait(Result(
+        results.put_nowait(FFTResult(
             id_,
             audio.dBFS,
-            len(fft_result),
             Decimal(str(np.mean(fft_result[:freq_LH]))),
             Decimal(str(np.mean(fft_result[freq_ML:freq_MH]))),
             Decimal(str(np.mean(fft_result[freq_HL:freq_HH]))),
@@ -145,10 +157,9 @@ class Analyser(QRunnable):
             fft_result = fft_audiosegment(audio, self.__start_time, self.__duration)
 
             self.__works.task_done()
-            self.__results.put_nowait(Result(
+            self.__results.put_nowait(FFTResult(
                 id_,
                 audio.dBFS,
-                len(fft_result),
                 Decimal(str(np.mean(fft_result[:self.__freq_LH]))),
                 Decimal(str(np.mean(fft_result[self.__freq_ML:self.__freq_MH]))),
                 Decimal(str(np.mean(fft_result[self.__freq_HL:self.__freq_HH]))),
@@ -172,51 +183,121 @@ class AudioInfo(QStandardItemModel):
 
         self.set_horizontal_header_labels(self.HEADER_TEXTS)
 
-        self.__files = []
-        self.__raw_fft_results: Dict[int, Union[np.ndarray, str]] = {}
+        self.analyse_results: Dict[int, FileResult] = {}
+        self.file_to_analyse: List[Tuple[int, str]] = []
 
-    @property
-    def files(self) -> List[str]:
-        return self.__files.copy()
+    def clear(self):
+        super().clear()
+        self.analyse_results: Dict[int, FileResult] = {}
+        self.file_to_analyse: List[Tuple[int, str]] = []
 
-    def add_file(self, file_path: str):
-        def make_items(texts):
-            items = []
-            for d in texts:
-                item = QStandardItem(d)
-                item.set_editable(False)
-                items.append(item)
-            return items
+    def clear_file_to_analyse(self) -> None:
+        self.file_to_analyse.clear()
 
-        self.__files.append(file_path)
-        self.append_row(make_items(chain(
+    def clear_and_get_file_to_analyse(self) -> List[Tuple[int, str]]:
+        file_to_analyse = self.file_to_analyse
+        self.file_to_analyse.clear()
+        return file_to_analyse
+
+    def add_file(self, file_path: str) -> None:
+        self.file_to_analyse.append((len(self.file_to_analyse), file_path))
+        self.append_row(self.__make_items(chain(
             (file_path,), repeat('-', len(self.HEADER_TEXTS) - 1)
         )))
 
-    def add_files(self, file_paths: Iterable[str]):
+    def add_files(self, file_paths: Iterable[str]) -> None:
         for path in file_paths:
             self.add_file(path)
 
-    def set_result(self, index: int, result: Result):
-        intensity_L = log10(result.intensity_L)
-        intensity_M = log10(result.intensity_M)
-        intensity_H = log10(result.intensity_H)
-        intensity_N = log10(result.intensity_N)
+    def set_result(self, index: int, result: FFTResult) -> None:
+        intensity_M = result.intensity_M.log10()
+        intensity_H = result.intensity_H.log10()
+        intensity_N = result.intensity_N.log10()
+
+        file_result = FileResult(
+            self.item(index, 0).text(),
+            result.dbFS,
+            result.intensity_L.log10(),
+            intensity_M,
+            intensity_H,
+            intensity_N,
+            intensity_H / intensity_M,
+            intensity_N / intensity_M,
+            result.raw_result
+        )
+        self.analyse_results[index] = file_result
+
         self.item(index, 1).set_text('완료')
-        self.item(index, 2).set_text(str(f'{result.dbFS:.3f}'))
-        self.item(index, 3).set_text(f'{intensity_L:.2f}')
-        self.item(index, 4).set_text(f'{intensity_M:.2f}')
-        self.item(index, 5).set_text(f'{intensity_H:.2f}')
-        self.item(index, 6).set_text(f'{intensity_N:.2f}')
-        self.item(index, 7).set_text(f'{intensity_H / intensity_M * 100:.2f}%')
-        self.item(index, 8).set_text(f'{intensity_N / intensity_M * 100:.2f}%')
-        self.__raw_fft_results[index] = result.raw_result
+        self.item(index, 2).set_text(f'{file_result.dBFS:.3f}')
+        for k in range(2, 6):
+            self.item(index, k + 1).set_text(f'{file_result[k]:.2f}')
+        for k in range(6, 8):
+            self.item(index, k + 1).set_text(f'{file_result[k] * 100:.2f}%')
 
-    def load(self, file_name: str):
-        raise NotImplementedError
+    def import_(self, data: Iterable) -> None:
+        self.clear()
+        self.set_horizontal_header_labels(self.HEADER_TEXTS)
 
-    def save(self, file_name: str):
-        raise NotImplementedError
+        for k, (
+            path,
+            dBFS,
+            intensity_L,
+            intensity_M,
+            intensity_H,
+            intensity_N,
+            H_div_M,
+            N_div_M,
+            raw_result
+        ) in enumerate(data):
+            if raw_result is not None:
+                raw_result = np.array(list(map(np.double, raw_result)))
+            file_result = FileResult(
+                path,
+                dBFS,
+                Decimal(intensity_L),
+                Decimal(intensity_M),
+                Decimal(intensity_H),
+                Decimal(intensity_N),
+                Decimal(H_div_M),
+                Decimal(N_div_M),
+                raw_result
+            )
+            self.analyse_results[k] = file_result
+
+            texts = [path, '완료', f'{file_result.dBFS:.3f}']
+            for intensity in (
+                intensity_L, intensity_M, intensity_H, intensity_N
+            ):
+                texts.append(f'{Decimal(intensity):.2f}')
+            for intensity_div in (
+                H_div_M, N_div_M
+            ):
+                texts.append(f'{Decimal(intensity_div) * 100:.2f}%')
+            self.append_row(self.__make_items(texts))
+
+    def export(self, export_raw_result: bool) -> List:
+        return [
+            (
+                (result := self.analyse_results[k]).path,
+                result.dBFS,
+                str(result.intensity_L),
+                str(result.intensity_M),
+                str(result.intensity_H),
+                str(result.intensity_N),
+                str(result.H_div_M),
+                str(result.N_div_M),
+                list(map(str, result.raw_result))
+                if export_raw_result and result.raw_result is not None else None
+            ) for k in sorted(self.analyse_results.keys())
+        ]
+    
+    def __make_items(self, texts):
+        items = []
+        for d in texts:
+            item = QStandardItem(d)
+            item.set_editable(False)
+            items.append(item)
+        return items
 
 
 class Main(QMainWindow, Ui_Main):
@@ -252,7 +333,7 @@ class Main(QMainWindow, Ui_Main):
 
         self.__remain_works = 0
         self.__results = {}
-        self.__result_queue: Queue[Result] = Queue()
+        self.__result_queue: Queue[FFTResult] = Queue()
 
         self.__result_check_timer = QTimer(self)
         self.__result_check_timer.interval = 250
@@ -321,23 +402,22 @@ class Main(QMainWindow, Ui_Main):
     def __apply_threshold(self, row: int):
         threshold_h_div_m = self.spHDivM.value
         threshold_n_div_m = self.spNdivM.value
-        idial_dB = -Decimal(self.spdB.text[1:-5])
-        threshold_dB_diff = Decimal(self.spdBDiff.text[1:-5])
+        idial_dB = self.spdB.value
+        threshold_dB_diff = self.spdBDiff.value
 
-        item_h_div_m = self.__audio_infos.item(row, 7)
-        item_n_div_m = self.__audio_infos.item(row, 8)
-        item_dBFS = self.__audio_infos.item(row, 2)
-
-        h_div_m = Decimal(item_h_div_m.text().replace('%', ''))
-        n_div_m = Decimal(item_n_div_m.text().replace('%', ''))
-        dBFS = Decimal(item_dBFS.text())
-
-        if h_div_m < threshold_h_div_m:
-            item_h_div_m.set_foreground(QColor(255, 0, 0))
-        if n_div_m > threshold_n_div_m:
-            item_n_div_m.set_foreground(QColor(255, 0, 0))
-        if dBFS > idial_dB + threshold_dB_diff or dBFS < idial_dB - threshold_dB_diff:
-            item_dBFS.set_foreground(QColor(255, 0, 0))
+        analyse_result = self.__audio_infos.analyse_results[row]
+        if analyse_result.H_div_M < threshold_h_div_m:
+            self.__audio_infos.item(row, 7)\
+                .set_foreground(QColor(255, 0, 0))
+        if analyse_result.N_div_M > threshold_n_div_m:
+            self.__audio_infos.item(row, 8)\
+                .set_foreground(QColor(255, 0, 0))
+        if (
+            analyse_result.dBFS > idial_dB + threshold_dB_diff
+            or analyse_result.dBFS < idial_dB - threshold_dB_diff
+        ):
+            self.__audio_infos.item(row, 2)\
+                .set_foreground(QColor(255, 0, 0))
 
     def __get_results(self):
         while not self.__result_queue.empty():
@@ -355,17 +435,19 @@ class Main(QMainWindow, Ui_Main):
             self.__analyse_end()
 
     def __start_analyse(self):
+        works = Queue()
+        id_ = -1
+        for id_, work in self.__audio_infos.file_to_analyse:
+            works.put_nowait((id_, work))
+        self.__remain_works = id_ + 1
+        if not self.__remain_works:
+            return
+
         for widget in self.__DISABLE_ON_START_WORK:
             widget.enabled = False
         self.btnStartAnalyse.text = '분석 중지'
         self.btnStartAnalyse.clicked.disconnect()
         self.btnStartAnalyse.clicked.connect(self.__abort_analyse)
-
-        works = Queue()
-        id_ = -1
-        for id_, work in enumerate(self.__audio_infos.files):
-            works.put_nowait((id_, work))
-        self.__remain_works = id_ + 1
 
         if self.chkEnableCut.checked:
             start_time_obj = self.teStart.time
@@ -421,16 +503,21 @@ class Main(QMainWindow, Ui_Main):
         QMessageBox.critical(self, "미구현 기능", "함수 abort_analyse 은(는) 구현되지 않음")
 
     def __load_result(self):
-        QMessageBox.critical(self, "미구현 기능", "함수 load_result 은(는) 구현되지 않음")
+        save_file, _ = QFileDialog.get_open_file_name(
+            self, '결과 파일 선택', os.path.expanduser('~'), 'JSON File (*.json)'
+        )
+        with open(save_file, 'r', encoding='utf-8') as file:
+            data = json.load(file)
+        self.__audio_infos.import_(data)
+        self.__resize_rows()
 
     def __save_result(self):
-        QMessageBox.critical(self, "미구현 기능", "함수 save_result 은(는) 구현되지 않음")
-
-
-def test():
-    for _ in range(10):
-        print('running...')
-        time.sleep(1)
+        save_file, _ = QFileDialog.get_save_file_name(
+            self, '결과 파일 선택', os.path.expanduser('~'), 'JSON File (*.json)'
+        )
+        data = self.__audio_infos.export(self.chkIncludeFFTRes.checked)
+        with open(save_file, 'w', encoding='utf-8') as file:
+            json.dump(data, file, indent=2, ensure_ascii=False)
 
 
 if __name__ == '__main__':

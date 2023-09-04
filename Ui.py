@@ -314,6 +314,7 @@ class Ui_Main:
             "\uc77d\uc744 \ud06c\uae30 \uc9c0\uc815"
         )
         self.lbThread.setText("\uc4f0\ub808\ub4dc \uc218")
+        self.spSize.setSpecialValueText("Auto")
         self.spSize.setSuffix(" KiB")
         self.teStart.setDisplayFormat("mm:ss")
         self.teDuration.setDisplayFormat("mm:ss")
