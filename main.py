@@ -406,10 +406,12 @@ class Main(QMainWindow, Ui_Main):
         threshold_dB_diff = self.spdBDiff.value
 
         analyse_result = self.__audio_infos.analyse_results[row]
-        if analyse_result.H_div_M < threshold_h_div_m:
+        print(analyse_result.H_div_M, threshold_h_div_m)
+        if analyse_result.H_div_M * 100 < threshold_h_div_m:
             self.__audio_infos.item(row, 7)\
                 .set_foreground(QColor(255, 0, 0))
-        if analyse_result.N_div_M > threshold_n_div_m:
+        print(analyse_result.N_div_M, threshold_n_div_m)
+        if analyse_result.N_div_M * 100 > threshold_n_div_m:
             self.__audio_infos.item(row, 8)\
                 .set_foreground(QColor(255, 0, 0))
         if (
