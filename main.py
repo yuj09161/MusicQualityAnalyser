@@ -290,9 +290,9 @@ class Main(QMainWindow, Ui_Main):
         self.spFreqNL.value = 20500
 
         self.spHDivM.value = 80
-        self.spNdivM.value = 65
-        self.spdB.value = -11.5
-        self.spdBDiff.value = 0.5
+        self.spNdivM.value = 30
+        self.spdB.value = -12.0
+        self.spdBDiff.value = 2
 
     def __resize_rows(self):
         for k in range(0, self.__audio_infos.column_count()):
@@ -318,7 +318,7 @@ class Main(QMainWindow, Ui_Main):
         for row in range(self.__audio_infos.row_count()):
             self.__apply_threshold(row)
 
-    def __apply_threshold(self, row: Optional[int] = None):
+    def __apply_threshold(self, row: int):
         threshold_h_div_m = self.spHDivM.value
         threshold_n_div_m = self.spNdivM.value
         idial_dB = -Decimal(self.spdB.text[1:-5])
