@@ -9,13 +9,12 @@ from PySide6.QtWidgets import (
 )
 from __feature__ import snake_case, true_property
 
-from concurrent.futures import ProcessPoolExecutor
 from decimal import Decimal
 from io import BytesIO
 from itertools import chain, repeat
-from multiprocessing import Process, Queue, JoinableQueue, cpu_count
-from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tuple
-from queue import Empty as QueueEmpty
+from multiprocessing import cpu_count
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
+from queue import Queue
 import json
 import os
 import sys
@@ -170,69 +169,10 @@ def do_fft(
         ))
 
 
-def fft_worker(
-    works: JoinableQueue,
-    results: Queue,
-    config: FFTConfig
-):
-    print(os.getppid(), '|', os.getpid())
-    while not works.empty():
-        try:
-            id_, path = works.get_nowait()
-        except QueueEmpty:
-            return
-        do_fft((id_, path), results, config)
-        works.task_done()
-
-
-class ProcessManager:
-    def __init__(self, max_process_count: Optional[int] = None):
-        if max_process_count is not None:
-            self.__max_cnt = max_process_count
-        elif (cnt := os.cpu_count()) is not None:
-            self.__max_cnt = cnt
-        else:
-            self.__max_cnt = 1
-        self.__alive_processes: List[Process] = []
-
-    @property
-    def max_process_count(self) -> int:
-        return self.__max_cnt
-
-    @max_process_count.setter
-    def max_process_count(self, max_process_count: int) -> None:
-        assert isinstance(max_process_count, int)
-        self.__max_cnt = max_process_count
-
-    @property
-    def running_process_cnt(self):
-        self.update_process_status()
-        return len(self.__alive_processes)
-
-    def submit(
-        self,
-        work: Callable,
-        *args,
-        daemon: bool = True,
-        **kwargs,
-    ) -> None:
-        self.update_process_status()
-        if len(self.__alive_processes) < self.__max_cnt:
-            process = Process(target=work, args=args, kwargs=kwargs, daemon=daemon)
-            process.start()
-            self.__alive_processes.append(process)
-
-    def update_process_status(self):
-        self.__alive_processes = [
-            process for process in self.__alive_processes
-            if process.is_alive()
-        ]
-
-
 class Analyser(QRunnable):
     def __init__(
         self,
-        work_queue: JoinableQueue,
+        work_queue: Queue,
         result_queue: Queue,
         config: FFTConfig
     ):
@@ -418,8 +358,6 @@ class Main(QMainWindow, Ui_Main):
         self.__results = {}
         self.__result_queue: Queue[FFTResult] = Queue()
 
-        self.__process_mananger = ProcessManager()
-
         self.__result_check_timer = QTimer(self)
         self.__result_check_timer.interval = 250
         self.__result_check_timer.single_shot_ = False
@@ -436,7 +374,6 @@ class Main(QMainWindow, Ui_Main):
         self.btnAddFiles.clicked.connect(self.__add_files)
         self.btnApplyThreshold.clicked.connect(self.__apply_threshold_all)
         self.btnStartAnalyse.clicked.connect(self.__start_analyse)
-        # self.btnStartAnalyse.clicked.connect(self.__start_analyse_process)
         self.btnLoadRes.clicked.connect(self.__load_result)
         self.btnSaveRes.clicked.connect(self.__save_result)
 
@@ -491,6 +428,18 @@ class Main(QMainWindow, Ui_Main):
         self.teStart.enabled = state
         self.teDuration.enabled = state
 
+    def __add_files(self):
+        files, _ = QFileDialog.get_open_file_names(
+            self, "불러올 음악 파일(들) 선택",
+            self.__last_audio_dir,
+            'Audio Files (*.mp3 *.m4a *.opus *.webm)'
+        )
+        if not files:
+            return
+        self.__audio_infos.add_files(files)
+        self.__resize_rows()
+        self.__last_audio_dir = os.path.dirname(files[0])
+
     def __load_result(self):
         save_file, _ = QFileDialog.get_open_file_name(
             self, '결과 파일 선택', self.__last_results_dir, 'JSON File (*.json)'
@@ -519,18 +468,6 @@ class Main(QMainWindow, Ui_Main):
             )
         self.__last_results_dir = os.path.dirname(save_file)
 
-    def __add_files(self):
-        files, _ = QFileDialog.get_open_file_names(
-            self, "불러올 음악 파일(들) 선택",
-            self.__last_audio_dir,
-            'Audio Files (*.mp3 *.m4a *.opus *.webm)'
-        )
-        if not files:
-            return
-        self.__audio_infos.add_files(files)
-        self.__resize_rows()
-        self.__last_audio_dir = os.path.dirname(files[0])
-
     def __apply_threshold_all(self):
         for row in range(self.__audio_infos.row_count()):
             self.__apply_threshold(row)
@@ -556,7 +493,7 @@ class Main(QMainWindow, Ui_Main):
                 .set_foreground(QColor(255, 0, 0))
 
     def __start_analyse(self):
-        works = JoinableQueue()
+        works = Queue()
         id_ = -1
         for id_, work in self.__audio_infos.clear_and_get_file_to_analyse():
             works.put_nowait((id_, work))
@@ -599,47 +536,8 @@ class Main(QMainWindow, Ui_Main):
 
         self.__result_check_timer.start()
 
-    def __start_analyse_process(self):
-        works = JoinableQueue()
-        id_ = -1
-        for id_, work in self.__audio_infos.clear_and_get_file_to_analyse():
-            works.put_nowait((id_, work))
-        self.__remain_works = id_ + 1
-        if not self.__remain_works:
-            return
-
-        for widget in self.__DISABLE_ON_START_WORK:
-            widget.enabled = False
-        self.btnStartAnalyse.text = '분석 중지'
-        self.btnStartAnalyse.clicked.disconnect()
-        self.btnStartAnalyse.clicked.connect(self.__abort_analyse)
-
-        if self.chkEnableCut.checked:
-            start_time_obj = self.teStart.time
-            start_time = start_time_obj.minute() * 60 + start_time_obj.second()
-            duration_obj = self.teDuration.time
-            duration = duration_obj.minute() * 60 + duration_obj.second()
-        else:
-            start_time = 0
-            duration = 0
-
-        config = FFTConfig(
-            self.spSize.value if self.chkEnableSizeCut.checked else 0,
-            start_time, duration,
-            self.spFreqLH.value,
-            self.spFreqML.value, self.spFreqMH.value,
-            self.spFreqHL.value, self.spFreqHH.value,
-            self.spFreqNL.value
-        )
-
-        process_cnt = self.spThread.value
-        self.__process_mananger.max_process_count = process_cnt
-        for _ in range(process_cnt):
-            self.__process_mananger.submit(
-                fft_worker, works, self.__result_queue, config
-            )
-
-        self.__result_check_timer.start()
+    def __abort_analyse(self):
+        QMessageBox.critical(self, "미구현 기능", "함수 abort_analyse 은(는) 구현되지 않음")
 
     def __analyse_end(self):
         self.__result_check_timer.stop()
@@ -650,9 +548,6 @@ class Main(QMainWindow, Ui_Main):
             widget.enabled = True
         self.__set_size_cut_enable()
         self.__set_time_edit_enable()
-
-    def __abort_analyse(self):
-        QMessageBox.critical(self, "미구현 기능", "함수 abort_analyse 은(는) 구현되지 않음")
 
     def __import_settings(self, settings: Dict[str, Any]):
         self.chkEnableSizeCut.checked = settings['size_cut_enabled']
