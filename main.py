@@ -13,8 +13,9 @@ from concurrent.futures import ProcessPoolExecutor
 from decimal import Decimal
 from io import BytesIO
 from itertools import chain, repeat
-from multiprocessing import Queue, JoinableQueue, cpu_count
-from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
+from multiprocessing import Process, Queue, JoinableQueue, cpu_count
+from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tuple
+from queue import Empty as QueueEmpty
 import json
 import os
 import sys
@@ -176,9 +177,56 @@ def fft_worker(
 ):
     print(os.getppid(), '|', os.getpid())
     while not works.empty():
-        id_, path = works.get_nowait()
+        try:
+            id_, path = works.get_nowait()
+        except QueueEmpty:
+            return
         do_fft((id_, path), results, config)
         works.task_done()
+
+
+class ProcessManager:
+    def __init__(self, max_process_count: Optional[int] = None):
+        if max_process_count is not None:
+            self.__max_cnt = max_process_count
+        elif (cnt := os.cpu_count()) is not None:
+            self.__max_cnt = cnt
+        else:
+            self.__max_cnt = 1
+        self.__alive_processes: List[Process] = []
+
+    @property
+    def max_process_count(self) -> int:
+        return self.__max_cnt
+
+    @max_process_count.setter
+    def max_process_count(self, max_process_count: int) -> None:
+        assert isinstance(max_process_count, int)
+        self.__max_cnt = max_process_count
+
+    @property
+    def running_process_cnt(self):
+        self.update_process_status()
+        return len(self.__alive_processes)
+
+    def submit(
+        self,
+        work: Callable,
+        *args,
+        daemon: bool = True,
+        **kwargs,
+    ) -> None:
+        self.update_process_status()
+        if len(self.__alive_processes) < self.__max_cnt:
+            process = Process(target=work, args=args, kwargs=kwargs, daemon=daemon)
+            process.start()
+            self.__alive_processes.append(process)
+
+    def update_process_status(self):
+        self.__alive_processes = [
+            process for process in self.__alive_processes
+            if process.is_alive()
+        ]
 
 
 class Analyser(QRunnable):
@@ -370,6 +418,8 @@ class Main(QMainWindow, Ui_Main):
         self.__results = {}
         self.__result_queue: Queue[FFTResult] = Queue()
 
+        self.__process_mananger = ProcessManager()
+
         self.__result_check_timer = QTimer(self)
         self.__result_check_timer.interval = 250
         self.__result_check_timer.single_shot_ = False
@@ -385,8 +435,8 @@ class Main(QMainWindow, Ui_Main):
         self.chkEnableCut.clicked.connect(self.__set_time_edit_enable)
         self.btnAddFiles.clicked.connect(self.__add_files)
         self.btnApplyThreshold.clicked.connect(self.__apply_threshold_all)
-        # self.btnStartAnalyse.clicked.connect(self.__start_analyse)
-        self.btnStartAnalyse.clicked.connect(self.__start_analyse_process)
+        self.btnStartAnalyse.clicked.connect(self.__start_analyse)
+        # self.btnStartAnalyse.clicked.connect(self.__start_analyse_process)
         self.btnLoadRes.clicked.connect(self.__load_result)
         self.btnSaveRes.clicked.connect(self.__save_result)
 
@@ -583,11 +633,11 @@ class Main(QMainWindow, Ui_Main):
         )
 
         process_cnt = self.spThread.value
-        with ProcessPoolExecutor(process_cnt) as executor:
-            for _ in range(process_cnt):
-                executor.submit(
-                    fft_worker, works, self.__result_queue, config
-                )
+        self.__process_mananger.max_process_count = process_cnt
+        for _ in range(process_cnt):
+            self.__process_mananger.submit(
+                fft_worker, works, self.__result_queue, config
+            )
 
         self.__result_check_timer.start()
 
@@ -606,9 +656,11 @@ class Main(QMainWindow, Ui_Main):
 
     def __import_settings(self, settings: Dict[str, Any]):
         self.chkEnableSizeCut.checked = settings['size_cut_enabled']
+        self.__set_size_cut_enable()
         self.spSize.value = settings['cut_size']
 
         self.chkEnableCut.checked = settings['enable_cut']
+        self.__set_time_edit_enable()
         self.teStart.time.from_string(settings['start_time'], 'mm:ss')
         self.teDuration.time.from_string(settings['duration'], 'mm:ss')
 
