@@ -1,21 +1,24 @@
-from collections.abc import Sequence as ABCSequence
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from copy import deepcopy
+from PySide6.QtCore import QRunnable, QThreadPool, QTimer, Signal, SignalInstance
+from PySide6.QtGui import QCloseEvent, QColor, QStandardItem, QStandardItemModel
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QMainWindow,
+    QMessageBox,
+    QWidget,
+)
+from __feature__ import snake_case, true_property
+
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from decimal import Decimal
-from functools import partialmethod
 from io import BytesIO
 from itertools import chain, repeat
-from math import log10
-from multiprocessing import cpu_count  # , Queue
+from multiprocessing import cpu_count
 from queue import Queue
-from typing import Callable, Dict, Generic, Iterable, List, NamedTuple, Optional, Sequence, Tuple, TypeVar, Union
-import os
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 import json
-
-from PySide6.QtCore import QRunnable, QThreadPool, Signal, QTimer, SignalInstance
-from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
-from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox, QWidget
-from __feature__ import snake_case, true_property
+import os
+import sys
 
 from pydub import AudioSegment
 import numpy as np
@@ -23,7 +26,60 @@ import numpy as np
 from Ui import Ui_Main
 
 
+PLATFORM = sys.platform
+if PLATFORM == 'win32':
+    DATADIR = os.environ['localappdata'] + '/'
+elif PLATFORM == 'linux':
+    DATADIR = os.path.expanduser('~') + '/.local/share/'
+elif PLATFORM == 'darwin':
+    DATADIR = os.path.expanduser('~') + '/Library/Application Support/'
+else:
+    DATADIR = os.path.expanduser('~') + '/'
+
+
+DEFAULT_SETTINGS = {
+    'size_cut_enabled': True,
+    'cut_size': 1536,
+
+    'enable_cut': True,
+    'start_time': '00:40',
+    'duration': '00:20',
+
+    'thread_cnt': max((cpu_count() - 2, 1)),
+
+    'HDivM': 80,
+    'NdivM': 30,
+    'dB': -12.0,
+    'dBDiff': 2,
+
+    'freq_LH': 5000,
+    'freq_ML': 10000,
+    'freq_MH': 14500,
+    'freq_HL': 16500,
+    'freq_HH': 19500,
+    'freq_NL': 20500,
+
+    'include_fft_raw': False,
+
+    'last_audio_dir': os.path.expanduser('~'),
+    'last_results_dir': os.path.expanduser('~'),
+}
+
+
+class FFTConfig(NamedTuple):
+    read_size_in_kib: int
+    start_time: int
+    duration: int
+    freq_LH: int
+    freq_ML: int
+    freq_MH: int
+    freq_HL: int
+    freq_HH: int
+    freq_NH: int
+
+
 class FFTResult(NamedTuple):
+    succeed: bool
     id_: int
     dbFS: float
     intensity_L: Decimal
@@ -77,7 +133,7 @@ def fft_audiosegment(
 
 
 def do_fft(
-    works: Queue,
+    work: Tuple[int, str],
     results: Queue,
     read_size_in_kib: int,
     start_time: int,
@@ -89,10 +145,8 @@ def do_fft(
     freq_HH: int,
     freq_NH: int,
 ):
-    print('do_fft', works, results, works.empty())
-    while not works.empty():
-        id_, file_to_open = works.get_nowait()
-
+    id_, file_to_open = work
+    try:
         if read_size_in_kib:
             with open(file_to_open, 'rb') as file:
                 data = file.read(read_size_in_kib)
@@ -102,6 +156,7 @@ def do_fft(
         fft_result = fft_audiosegment(audio, start_time, duration)
 
         results.put_nowait(FFTResult(
+            True,
             id_,
             audio.dBFS,
             Decimal(str(np.mean(fft_result[:freq_LH]))),
@@ -110,6 +165,17 @@ def do_fft(
             Decimal(str(np.mean(fft_result[freq_NH:]))),
             fft_result
         ))
+    except Exception:
+        results.put_nowait(FFTResult(
+            False,
+            id_,
+            0,
+            Decimal(0),
+            Decimal(0),
+            Decimal(0),
+            Decimal(0),
+            np.array([])
+        ))
 
 
 class Analyser(QRunnable):
@@ -117,56 +183,28 @@ class Analyser(QRunnable):
         self,
         work_queue: Queue,
         result_queue: Queue,
-        done_signal: SignalInstance,
-        read_size_in_kib: int,
-        start_time: int,
-        duration: int,
-        freq_LH: int,
-        freq_ML: int,
-        freq_MH: int,
-        freq_HL: int,
-        freq_HH: int,
-        freq_NH: int,
+        config: FFTConfig
     ):
         super().__init__()
 
         self.__works = work_queue
         self.__results = result_queue
-        self.__work_done_signal = done_signal
 
-        self.__read_size_in_kib = read_size_in_kib
-        self.__start_time = start_time
-        self.__duration = duration
-        self.__freq_LH = freq_LH
-        self.__freq_ML = freq_ML
-        self.__freq_MH = freq_MH
-        self.__freq_HL = freq_HL
-        self.__freq_HH = freq_HH
-        self.__freq_NH = freq_NH
+        self.__read_size_in_kib = config.read_size_in_kib
+        self.__start_time = config.start_time
+        self.__duration = config.duration
+        self.__freq_LH = config.freq_LH
+        self.__freq_ML = config.freq_ML
+        self.__freq_MH = config.freq_MH
+        self.__freq_HL = config.freq_HL
+        self.__freq_HH = config.freq_HH
+        self.__freq_NH = config.freq_NH
 
     def run(self):
         while not self.__works.empty():
             id_, file_to_open = self.__works.get_nowait()
-
-            if self.__read_size_in_kib:
-                with open(file_to_open, 'rb') as file:
-                    data = file.read(self.__read_size_in_kib)
-                file_to_open = BytesIO(data)
-            audio = AudioSegment.from_file(file_to_open)
-
-            fft_result = fft_audiosegment(audio, self.__start_time, self.__duration)
-
+            do_fft((id_, file), self.__results)
             self.__works.task_done()
-            self.__results.put_nowait(FFTResult(
-                id_,
-                audio.dBFS,
-                Decimal(str(np.mean(fft_result[:self.__freq_LH]))),
-                Decimal(str(np.mean(fft_result[self.__freq_ML:self.__freq_MH]))),
-                Decimal(str(np.mean(fft_result[self.__freq_HL:self.__freq_HH]))),
-                Decimal(str(np.mean(fft_result[self.__freq_NH:]))),
-                fft_result
-            ))
-            self.__work_done_signal.emit(id_)
 
 
 class AudioInfo(QStandardItemModel):
@@ -213,6 +251,9 @@ class AudioInfo(QStandardItemModel):
         intensity_M = result.intensity_M.log10()
         intensity_H = result.intensity_H.log10()
         intensity_N = result.intensity_N.log10()
+
+        if not result.succeed:
+            self.item(index, 1).set_text('실패')
 
         file_result = FileResult(
             self.item(index, 0).text(),
@@ -301,7 +342,7 @@ class AudioInfo(QStandardItemModel):
 
 
 class Main(QMainWindow, Ui_Main):
-    analyse_done = Signal(int)
+    __CFG_PATH = DATADIR + 'hys.musicqualityanalyser/config.json'
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -343,37 +384,56 @@ class Main(QMainWindow, Ui_Main):
         self.__audio_infos = AudioInfo(self.tvResult)
         self.tvResult.set_model(self.__audio_infos)
 
+        self.__last_audio_dir = ''
+        self.__last_results_dir = ''
+
         self.chkEnableSizeCut.clicked.connect(self.__set_size_cut_enable)
         self.chkEnableCut.clicked.connect(self.__set_time_edit_enable)
         self.btnAddFiles.clicked.connect(self.__add_files)
         self.btnApplyThreshold.clicked.connect(self.__apply_threshold_all)
         self.btnStartAnalyse.clicked.connect(self.__start_analyse)
+        # self.btnStartAnalyse.clicked.connect(self.__start_analyse_process)
         self.btnLoadRes.clicked.connect(self.__load_result)
         self.btnSaveRes.clicked.connect(self.__save_result)
 
-        # self.analyse_done.connect(self.__done_analyse)
-
-        self.__set_default_values()
         self.__resize_rows()
 
-    def __set_default_values(self):
-        self.chkEnableSizeCut.checked = True
-        self.chkEnableCut.checked = True
+        if os.path.isfile(self.__CFG_PATH):
+            try:
+                with open(self.__CFG_PATH, 'r', encoding='utf-8') as file:
+                    settings = json.load(file)
+                self.__import_settings(settings)
+            except Exception:
+                self.__import_settings(DEFAULT_SETTINGS)
+        else:
+            self.__import_settings(DEFAULT_SETTINGS)
 
-        self.spSize.value = 1536
-        self.spThread.value = max((cpu_count() - 2, 1))
+    def close_event(self, event: QCloseEvent) -> None:
+        if not os.path.isdir(os.path.dirname(self.__CFG_PATH)):
+            os.makedirs(os.path.dirname(self.__CFG_PATH))
+        try:
+            with open(self.__CFG_PATH, 'w', encoding='utf-8') as file:
+                json.dump(self.__export_settings(), file, indent=2, ensure_ascii=False)
+        except Exception:
+            QMessageBox.warning(
+                self, '경고', '설정 파일 저장 불가'
+            )
+        return super().close_event(event)
 
-        self.spFreqLH.value = 5000
-        self.spFreqML.value = 10000
-        self.spFreqMH.value = 14500
-        self.spFreqHL.value = 16500
-        self.spFreqHH.value = 19500
-        self.spFreqNL.value = 20500
+    def __get_results(self):
+        while not self.__result_queue.empty():
+            result = self.__result_queue.get_nowait()
+            self.__results[result.id_] = result
+            self.__remain_works -= 1
+        for id_ in self.__results:
+            self.__done_analyse(id_)
 
-        self.spHDivM.value = 80
-        self.spNdivM.value = 30
-        self.spdB.value = -12.0
-        self.spdBDiff.value = 2
+    def __done_analyse(self, id_: int):
+        self.__audio_infos.set_result(id_, self.__results[id_])
+        self.__apply_threshold(id_)
+        self.__resize_rows()
+        if self.__remain_works == 0:
+            self.__analyse_end()
 
     def __resize_rows(self):
         for k in range(0, self.__audio_infos.column_count()):
@@ -387,13 +447,48 @@ class Main(QMainWindow, Ui_Main):
         self.teStart.enabled = state
         self.teDuration.enabled = state
 
+    def __load_result(self):
+        save_file, _ = QFileDialog.get_open_file_name(
+            self, '결과 파일 선택', self.__last_results_dir, 'JSON File (*.json)'
+        )
+        print(save_file)
+        if not save_file:
+            return
+        with open(save_file, 'r', encoding='utf-8') as file:
+            data = json.load(file)
+        self.__audio_infos.import_(data['result'])
+        self.__import_settings(data['settings'])
+        self.__resize_rows()
+        self.__last_results_dir = os.path.dirname(save_file)
+
+    def __save_result(self):
+        save_file, _ = QFileDialog.get_save_file_name(
+            self, '결과 파일 선택', self.__last_results_dir, 'JSON File (*.json)'
+        )
+        print(save_file)
+        if not save_file:
+            return
+        data = self.__audio_infos.export(self.chkIncludeFFTRes.checked)
+        settings = self.__export_settings()
+        with open(save_file, 'w', encoding='utf-8') as file:
+            json.dump(
+                {'result': data, 'settings': settings},
+                file, indent=2, ensure_ascii=False
+            )
+        self.__last_results_dir = os.path.dirname(save_file)
+
     def __add_files(self):
         files, _ = QFileDialog.get_open_file_names(
             self, "불러올 음악 파일(들) 선택",
-            os.path.expanduser('~')
+            self.__last_audio_dir,
+            'Audio Files (*.mp3 *.m4a *.opus *.webm)'
         )
+        print(files)
+        if not files:
+            return
         self.__audio_infos.add_files(files)
         self.__resize_rows()
+        self.__last_audio_dir = os.path.dirname(files[0])
 
     def __apply_threshold_all(self):
         for row in range(self.__audio_infos.row_count()):
@@ -421,25 +516,10 @@ class Main(QMainWindow, Ui_Main):
             self.__audio_infos.item(row, 2)\
                 .set_foreground(QColor(255, 0, 0))
 
-    def __get_results(self):
-        while not self.__result_queue.empty():
-            result = self.__result_queue.get_nowait()
-            self.__results[result.id_] = result
-            self.__remain_works -= 1
-        for id_ in self.__results:
-            self.__done_analyse(id_)
-
-    def __done_analyse(self, id_: int):
-        self.__audio_infos.set_result(id_, self.__results[id_])
-        self.__apply_threshold(id_)
-        self.__resize_rows()
-        if self.__remain_works == 0:
-            self.__analyse_end()
-
     def __start_analyse(self):
         works = Queue()
         id_ = -1
-        for id_, work in self.__audio_infos.file_to_analyse:
+        for id_, work in self.__audio_infos.clear_and_get_file_to_analyse():
             works.put_nowait((id_, work))
         self.__remain_works = id_ + 1
         if not self.__remain_works:
@@ -463,17 +543,18 @@ class Main(QMainWindow, Ui_Main):
         pool = QThreadPool.global_instance()
         pool.max_thread_count = self.spThread.value
 
+        config = FFTConfig(
+            self.spSize.value if self.chkEnableSizeCut.checked else 0,
+            start_time, duration,
+            self.spFreqLH.value,
+            self.spFreqML.value, self.spFreqMH.value,
+            self.spFreqHL.value, self.spFreqHH.value,
+            self.spFreqNL.value
+        )
+
         workers = []
         for _ in range(self.spThread.value):
-            worker = Analyser(
-                works, self.__result_queue, self.analyse_done,
-                self.spSize.value if self.chkEnableSizeCut.checked else 0,
-                start_time, duration,
-                self.spFreqLH.value,
-                self.spFreqML.value, self.spFreqMH.value,
-                self.spFreqHL.value, self.spFreqHH.value,
-                self.spFreqNL.value,
-            )
+            worker = Analyser(works, self.__result_queue, config)
             pool.start(worker)
             workers.append(worker)
             '''
@@ -491,6 +572,40 @@ class Main(QMainWindow, Ui_Main):
 
         self.__result_check_timer.start()
 
+    def __start_analyse_process(self):
+        works = self.__audio_infos.clear_and_get_file_to_analyse()
+        if not file_to_analyse:
+            return
+
+        for widget in self.__DISABLE_ON_START_WORK:
+            widget.enabled = False
+        self.btnStartAnalyse.text = '분석 중지'
+        self.btnStartAnalyse.clicked.disconnect()
+        self.btnStartAnalyse.clicked.connect(self.__abort_analyse)
+
+        if self.chkEnableCut.checked:
+            start_time_obj = self.teStart.time
+            start_time = start_time_obj.minute() * 60 + start_time_obj.second()
+            duration_obj = self.teDuration.time
+            duration = duration_obj.minute() * 60 + duration_obj.second()
+        else:
+            start_time = 0
+            duration = 0
+
+        config = FFTConfig(
+            self.spSize.value if self.chkEnableSizeCut.checked else 0,
+            start_time, duration,
+            self.spFreqLH.value,
+            self.spFreqML.value, self.spFreqMH.value,
+            self.spFreqHL.value, self.spFreqHH.value,
+            self.spFreqNL.value
+        )
+
+        with ProcessPoolExecutor(self.spThread.value) as executor:
+            executor.map(do_fft, works, repeat(self.__result_queue), repeat(config))
+
+        self.__result_check_timer.start()
+
     def __analyse_end(self):
         self.__result_check_timer.stop()
         self.btnStartAnalyse.clicked.disconnect()
@@ -504,22 +619,61 @@ class Main(QMainWindow, Ui_Main):
     def __abort_analyse(self):
         QMessageBox.critical(self, "미구현 기능", "함수 abort_analyse 은(는) 구현되지 않음")
 
-    def __load_result(self):
-        save_file, _ = QFileDialog.get_open_file_name(
-            self, '결과 파일 선택', os.path.expanduser('~'), 'JSON File (*.json)'
-        )
-        with open(save_file, 'r', encoding='utf-8') as file:
-            data = json.load(file)
-        self.__audio_infos.import_(data)
-        self.__resize_rows()
+    def __import_settings(self, settings: Dict[str, Any]):
+        self.chkEnableSizeCut.checked = settings['size_cut_enabled']
+        self.spSize.value = settings['cut_size']
 
-    def __save_result(self):
-        save_file, _ = QFileDialog.get_save_file_name(
-            self, '결과 파일 선택', os.path.expanduser('~'), 'JSON File (*.json)'
-        )
-        data = self.__audio_infos.export(self.chkIncludeFFTRes.checked)
-        with open(save_file, 'w', encoding='utf-8') as file:
-            json.dump(data, file, indent=2, ensure_ascii=False)
+        self.chkEnableCut.checked = settings['enable_cut']
+        self.teStart.time.from_string(settings['start_time'], 'mm:ss')
+        self.teDuration.time.from_string(settings['duration'], 'mm:ss')
+
+        self.spThread.value = settings['thread_cnt']
+
+        self.spHDivM.value = settings['HDivM']
+        self.spNdivM.value = settings['NdivM']
+        self.spdB.value = settings['dB']
+        self.spdBDiff.value = settings['dBDiff']
+
+        self.spFreqLH.value = settings['freq_LH']
+        self.spFreqML.value = settings['freq_ML']
+        self.spFreqMH.value = settings['freq_MH']
+        self.spFreqHL.value = settings['freq_HL']
+        self.spFreqHH.value = settings['freq_HH']
+        self.spFreqNL.value = settings['freq_NL']
+
+        self.chkIncludeFFTRes.checked = settings['include_fft_raw']
+
+        self.__last_audio_dir = settings['last_audio_dir']
+        self.__last_results_dir = settings['last_results_dir']
+
+    def __export_settings(self) -> Dict[str, Any]:
+        return {
+            'size_cut_enabled': self.chkEnableSizeCut.checked,
+            'cut_size': self.spSize.value,
+
+            'enable_cut': self.chkEnableCut.checked,
+            'start_time': self.teStart.time.to_string('mm:ss'),
+            'duration': self.teDuration.time.to_string('mm:ss'),
+
+            'thread_cnt': self.spThread.value,
+
+            'HDivM': self.spHDivM.value,
+            'NdivM': self.spNdivM.value,
+            'dB': self.spdB.value,
+            'dBDiff': self.spdBDiff.value,
+
+            'freq_LH': self.spFreqLH.value,
+            'freq_ML': self.spFreqML.value,
+            'freq_MH': self.spFreqMH.value,
+            'freq_HL': self.spFreqHL.value,
+            'freq_HH': self.spFreqHH.value,
+            'freq_NL': self.spFreqNL.value,
+
+            'include_fft_raw': self.chkIncludeFFTRes.checked,
+
+            'last_audio_dir': self.__last_audio_dir,
+            'last_results_dir': self.__last_results_dir,
+        }
 
 
 if __name__ == '__main__':
