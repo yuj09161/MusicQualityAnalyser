@@ -9,12 +9,11 @@ from PySide6.QtWidgets import (
 )
 from __feature__ import snake_case, true_property
 
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 from decimal import Decimal
 from io import BytesIO
 from itertools import chain, repeat
-from multiprocessing import cpu_count
-from queue import Queue
+from multiprocessing import Queue, JoinableQueue, cpu_count
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 import json
 import os
@@ -67,7 +66,7 @@ DEFAULT_SETTINGS = {
 
 
 class FFTConfig(NamedTuple):
-    read_size_in_kib: int
+    read_size: int
     start_time: int
     duration: int
     freq_LH: int
@@ -135,34 +134,26 @@ def fft_audiosegment(
 def do_fft(
     work: Tuple[int, str],
     results: Queue,
-    read_size_in_kib: int,
-    start_time: int,
-    duration: int,
-    freq_LH: int,
-    freq_ML: int,
-    freq_MH: int,
-    freq_HL: int,
-    freq_HH: int,
-    freq_NH: int,
+    config: FFTConfig
 ):
     id_, file_to_open = work
     try:
-        if read_size_in_kib:
+        if config.read_size:
             with open(file_to_open, 'rb') as file:
-                data = file.read(read_size_in_kib)
+                data = file.read(config.read_size)
             file_to_open = BytesIO(data)
         audio = AudioSegment.from_file(file_to_open)
 
-        fft_result = fft_audiosegment(audio, start_time, duration)
+        fft_result = fft_audiosegment(audio, config.start_time, config.duration)
 
         results.put_nowait(FFTResult(
             True,
             id_,
             audio.dBFS,
-            Decimal(str(np.mean(fft_result[:freq_LH]))),
-            Decimal(str(np.mean(fft_result[freq_ML:freq_MH]))),
-            Decimal(str(np.mean(fft_result[freq_HL:freq_HH]))),
-            Decimal(str(np.mean(fft_result[freq_NH:]))),
+            Decimal(str(np.mean(fft_result[:config.freq_LH]))),
+            Decimal(str(np.mean(fft_result[config.freq_ML:config.freq_MH]))),
+            Decimal(str(np.mean(fft_result[config.freq_HL:config.freq_HH]))),
+            Decimal(str(np.mean(fft_result[config.freq_NH:]))),
             fft_result
         ))
     except Exception:
@@ -178,10 +169,22 @@ def do_fft(
         ))
 
 
+def fft_worker(
+    works: JoinableQueue,
+    results: Queue,
+    config: FFTConfig
+):
+    print(os.getppid(), '|', os.getpid())
+    while not works.empty():
+        id_, path = works.get_nowait()
+        do_fft((id_, path), results, config)
+        works.task_done()
+
+
 class Analyser(QRunnable):
     def __init__(
         self,
-        work_queue: Queue,
+        work_queue: JoinableQueue,
         result_queue: Queue,
         config: FFTConfig
     ):
@@ -189,21 +192,12 @@ class Analyser(QRunnable):
 
         self.__works = work_queue
         self.__results = result_queue
-
-        self.__read_size_in_kib = config.read_size_in_kib
-        self.__start_time = config.start_time
-        self.__duration = config.duration
-        self.__freq_LH = config.freq_LH
-        self.__freq_ML = config.freq_ML
-        self.__freq_MH = config.freq_MH
-        self.__freq_HL = config.freq_HL
-        self.__freq_HH = config.freq_HH
-        self.__freq_NH = config.freq_NH
+        self.__config = config
 
     def run(self):
         while not self.__works.empty():
-            id_, file_to_open = self.__works.get_nowait()
-            do_fft((id_, file), self.__results)
+            id_, path = self.__works.get_nowait()
+            do_fft((id_, path), self.__results, self.__config)
             self.__works.task_done()
 
 
@@ -233,7 +227,7 @@ class AudioInfo(QStandardItemModel):
         self.file_to_analyse.clear()
 
     def clear_and_get_file_to_analyse(self) -> List[Tuple[int, str]]:
-        file_to_analyse = self.file_to_analyse
+        file_to_analyse = self.file_to_analyse.copy()
         self.file_to_analyse.clear()
         return file_to_analyse
 
@@ -391,8 +385,8 @@ class Main(QMainWindow, Ui_Main):
         self.chkEnableCut.clicked.connect(self.__set_time_edit_enable)
         self.btnAddFiles.clicked.connect(self.__add_files)
         self.btnApplyThreshold.clicked.connect(self.__apply_threshold_all)
-        self.btnStartAnalyse.clicked.connect(self.__start_analyse)
-        # self.btnStartAnalyse.clicked.connect(self.__start_analyse_process)
+        # self.btnStartAnalyse.clicked.connect(self.__start_analyse)
+        self.btnStartAnalyse.clicked.connect(self.__start_analyse_process)
         self.btnLoadRes.clicked.connect(self.__load_result)
         self.btnSaveRes.clicked.connect(self.__save_result)
 
@@ -451,7 +445,6 @@ class Main(QMainWindow, Ui_Main):
         save_file, _ = QFileDialog.get_open_file_name(
             self, '결과 파일 선택', self.__last_results_dir, 'JSON File (*.json)'
         )
-        print(save_file)
         if not save_file:
             return
         with open(save_file, 'r', encoding='utf-8') as file:
@@ -465,7 +458,6 @@ class Main(QMainWindow, Ui_Main):
         save_file, _ = QFileDialog.get_save_file_name(
             self, '결과 파일 선택', self.__last_results_dir, 'JSON File (*.json)'
         )
-        print(save_file)
         if not save_file:
             return
         data = self.__audio_infos.export(self.chkIncludeFFTRes.checked)
@@ -483,7 +475,6 @@ class Main(QMainWindow, Ui_Main):
             self.__last_audio_dir,
             'Audio Files (*.mp3 *.m4a *.opus *.webm)'
         )
-        print(files)
         if not files:
             return
         self.__audio_infos.add_files(files)
@@ -501,11 +492,9 @@ class Main(QMainWindow, Ui_Main):
         threshold_dB_diff = self.spdBDiff.value
 
         analyse_result = self.__audio_infos.analyse_results[row]
-        print(analyse_result.H_div_M, threshold_h_div_m)
         if analyse_result.H_div_M * 100 < threshold_h_div_m:
             self.__audio_infos.item(row, 7)\
                 .set_foreground(QColor(255, 0, 0))
-        print(analyse_result.N_div_M, threshold_n_div_m)
         if analyse_result.N_div_M * 100 > threshold_n_div_m:
             self.__audio_infos.item(row, 8)\
                 .set_foreground(QColor(255, 0, 0))
@@ -517,7 +506,7 @@ class Main(QMainWindow, Ui_Main):
                 .set_foreground(QColor(255, 0, 0))
 
     def __start_analyse(self):
-        works = Queue()
+        works = JoinableQueue()
         id_ = -1
         for id_, work in self.__audio_infos.clear_and_get_file_to_analyse():
             works.put_nowait((id_, work))
@@ -544,7 +533,7 @@ class Main(QMainWindow, Ui_Main):
         pool.max_thread_count = self.spThread.value
 
         config = FFTConfig(
-            self.spSize.value if self.chkEnableSizeCut.checked else 0,
+            self.spSize.value * 1024 if self.chkEnableSizeCut.checked else 0,
             start_time, duration,
             self.spFreqLH.value,
             self.spFreqML.value, self.spFreqMH.value,
@@ -557,24 +546,16 @@ class Main(QMainWindow, Ui_Main):
             worker = Analyser(works, self.__result_queue, config)
             pool.start(worker)
             workers.append(worker)
-            '''
-            self.__future = pool.submit(
-                do_fft,
-                works, self.__result_queue,
-                self.spSize.value if self.chkEnableSizeCut.checked else 0,
-                start_time, duration,
-                self.spFreqLH.value,
-                self.spFreqML.value, self.spFreqMH.value,
-                self.spFreqHL.value, self.spFreqHH.value,
-                self.spFreqNL.value
-            )
-            '''
 
         self.__result_check_timer.start()
 
     def __start_analyse_process(self):
-        works = self.__audio_infos.clear_and_get_file_to_analyse()
-        if not file_to_analyse:
+        works = JoinableQueue()
+        id_ = -1
+        for id_, work in self.__audio_infos.clear_and_get_file_to_analyse():
+            works.put_nowait((id_, work))
+        self.__remain_works = id_ + 1
+        if not self.__remain_works:
             return
 
         for widget in self.__DISABLE_ON_START_WORK:
@@ -601,8 +582,12 @@ class Main(QMainWindow, Ui_Main):
             self.spFreqNL.value
         )
 
-        with ProcessPoolExecutor(self.spThread.value) as executor:
-            executor.map(do_fft, works, repeat(self.__result_queue), repeat(config))
+        process_cnt = self.spThread.value
+        with ProcessPoolExecutor(process_cnt) as executor:
+            for _ in range(process_cnt):
+                executor.submit(
+                    fft_worker, works, self.__result_queue, config
+                )
 
         self.__result_check_timer.start()
 
