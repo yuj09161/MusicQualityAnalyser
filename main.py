@@ -368,6 +368,7 @@ class Main(QMainWindow, Ui_Main):
 
         self.__audio_infos = AudioInfo(self.tvResult)
         self.tvResult.set_model(self.__audio_infos)
+        self.__all_result_saved = True
 
         self.__last_audio_dir = ''
         self.__last_results_dir = ''
@@ -410,10 +411,11 @@ class Main(QMainWindow, Ui_Main):
             self.__results[result.id_] = result
             self.__remain_works -= 1
         for id_ in self.__results:
-            self.__done_analyse(id_)
+            self.__set_result(id_, self.__results[id_])
 
-    def __done_analyse(self, id_: int):
-        self.__audio_infos.set_result(id_, self.__results[id_])
+    def __set_result(self, id_: int, result: Dict):
+        self.__audio_infos.set_result(id_, result)
+        self.__all_result_saved = False
         self.__apply_threshold(id_)
         self.__resize_rows()
         if self.__remain_works == 0:
@@ -444,6 +446,17 @@ class Main(QMainWindow, Ui_Main):
         self.__last_audio_dir = os.path.dirname(files[0])
 
     def __load_result(self):
+        if not self.__all_result_saved:
+            choice = QMessageBox.warning(
+                self, '저장되지 않은 결과 있음',
+                '저장되지 않은 결과는 사라짐\n'
+                '계속?',
+                QMessageBox.Discard | QMessageBox.Save | QMessageBox.Cancel
+            )
+            if choice == QMessageBox.Cancel:
+                return
+            if choice == QMessageBox.Save:
+                self.__save_result()
         save_file, _ = QFileDialog.get_open_file_name(
             self, '결과 파일 선택', self.__last_results_dir, 'JSON File (*.json)'
         )
@@ -458,7 +471,7 @@ class Main(QMainWindow, Ui_Main):
 
     def __save_result(self):
         save_file, _ = QFileDialog.get_save_file_name(
-            self, '결과 파일 선택', self.__last_results_dir, 'JSON File (*.json)'
+            self, '결과 파일 저장 위치 선택', self.__last_results_dir, 'JSON File (*.json)'
         )
         if not save_file:
             return

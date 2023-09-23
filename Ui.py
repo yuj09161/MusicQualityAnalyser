@@ -305,7 +305,7 @@ class Ui_Main:
     # setupUi
 
     def retranslateUi(self, MainWindow):
-        MainWindow.setWindowTitle("MainWindow")
+        MainWindow.setWindowTitle("\uc74c\uc6d0 \uc74c\uc9c8 \ubd84\uc11d")
 
         self.gbSetGeneral.setTitle(
             "FFT / dBFS \ubd84\uc11d \uc124\uc815"
@@ -360,7 +360,7 @@ class Ui_Main:
         self.lbFreqNL.setText("L")
         self.spFreqNL.setSuffix(" Hz")
 
-        self.gbResult.setTitle("GroupBox")
+        self.gbResult.setTitle("\uacb0\uacfc \uc800\uc7a5/\ubd88\ub7ec\uc624\uae30")
         self.btnLoadRes.setText("\uacb0\uacfc \ubd88\ub7ec\uc624\uae30")
         self.chkIncludeFFTRes.setText("FFT \uacb0\uacfc \ud3ec\ud568")
         self.btnSaveRes.setText("\uacb0\uacfc \uc800\uc7a5")
