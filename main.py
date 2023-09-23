@@ -203,11 +203,13 @@ class AudioInfo(QStandardItemModel):
 
         self.set_horizontal_header_labels(self.HEADER_TEXTS)
 
+        self.file_cnt: int = 0
         self.analyse_results: Dict[int, FileResult] = {}
         self.file_to_analyse: List[Tuple[int, str]] = []
 
     def clear(self):
         super().clear()
+        self.file_cnt: int = 0
         self.analyse_results: Dict[int, FileResult] = {}
         self.file_to_analyse: List[Tuple[int, str]] = []
 
@@ -220,10 +222,11 @@ class AudioInfo(QStandardItemModel):
         return file_to_analyse
 
     def add_file(self, file_path: str) -> None:
-        self.file_to_analyse.append((len(self.file_to_analyse), file_path))
+        self.file_to_analyse.append((self.file_cnt, file_path))
         self.append_row(self.__make_items(chain(
             (file_path,), repeat('-', len(self.HEADER_TEXTS) - 1)
         )))
+        self.file_cnt += 1
 
     def add_files(self, file_paths: Iterable[str]) -> None:
         for path in file_paths:
@@ -494,12 +497,12 @@ class Main(QMainWindow, Ui_Main):
 
     def __start_analyse(self):
         works = Queue()
-        id_ = -1
-        for id_, work in self.__audio_infos.clear_and_get_file_to_analyse():
-            works.put_nowait((id_, work))
-        self.__remain_works = id_ + 1
-        if not self.__remain_works:
+        work_list = self.__audio_infos.clear_and_get_file_to_analyse()
+        if not work_list:
             return
+        for id_, work in work_list:
+            works.put_nowait((id_, work))
+        self.__remain_works = len(work_list)
 
         for widget in self.__DISABLE_ON_START_WORK:
             widget.enabled = False
